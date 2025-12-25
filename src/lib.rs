@@ -5,23 +5,22 @@ LICENSE: BSD3 (see LICENSE file)
 
 #![no_std]
 
-use embedded_hal as hal;
-use hal::delay::DelayNs;
-use hal::digital::OutputPin;
+use embedded_hal::delay::DelayNs;
+use embedded_hal::spi as hal_spi;
 
 #[cfg(feature = "rttdebug")]
 use panic_rtt_core::rprintln;
 
-mod interface;
-pub use interface::{I2cInterface, SensorInterface, SpiInterface};
+//mod interface;
+//pub use interface::{SensorInterface, SpiInterface};
+
+type SensorSpiDevice<SpiE> = dyn hal_spi::SpiDevice::<u8, Error = SpiE>;
 
 /// Errors in this crate
 #[derive(Debug)]
-pub enum Error<CommE, PinE> {
-    /// Sensor communication error
-    Comm(CommE),
-    /// Pin setting error
-    Pin(PinE),
+pub enum Error {
+    // Spi Error
+    Comm(hal_spi::ErrorKind),
 
     /// Unrecognized chip ID
     UnknownChipId,
@@ -29,46 +28,25 @@ pub enum Error<CommE, PinE> {
     Unresponsive,
 }
 
-pub struct Builder {}
-
-impl Builder {
-    /// Create a new driver using I2C interface
-    pub fn new_i2c<I2C, CommE>(&self, i2c: I2C, address: u8) -> ICM20689<I2cInterface<I2C>>
-    where
-        I2C: hal::i2c::I2c<Error = CommE>,
-        CommE: core::fmt::Debug,
-    {
-        let iface = interface::I2cInterface::new(i2c, address);
-        ICM20689::new_with_interface(iface)
-    }
-
-    /// Create a new driver using SPI interface
-    pub fn new_spi<SPI, CSN, CommE, PinE>(spi: SPI, csn: CSN) -> ICM20689<SpiInterface<SPI, CSN>>
-    where
-        SPI: hal::spi::SpiDevice<u8, Error = CommE>,
-        CSN: OutputPin<Error = PinE>,
-        CommE: core::fmt::Debug,
-        PinE: core::fmt::Debug,
-    {
-        let iface = interface::SpiInterface::new(spi, csn);
-        ICM20689::new_with_interface(iface)
-    }
-}
-
-pub struct ICM20689<SI> {
-    pub(crate) si: SI,
-
+pub struct ICM20689<'a, SpiE>
+where
+    SpiE: hal_spi::Error
+{
+    pub(crate) spi_dev: &'a mut SensorSpiDevice<SpiE>,
     pub(crate) gyro_scale: f32,
     pub(crate) accel_scale: f32,
 }
 
-impl<SI, CommE, PinE> ICM20689<SI>
+impl<'a, SpiE> ICM20689<'a, SpiE>
 where
-    SI: SensorInterface<InterfaceError = Error<CommE, PinE>>,
+    SpiE: hal_spi::Error
 {
-    pub(crate) fn new_with_interface(sensor_interface: SI) -> Self {
+
+    const DIR_READ: u8 = 0x80; // same as 1<<7
+
+    pub fn new_with_interface(spi_dev: &'a mut SensorSpiDevice<SpiE>) -> Self {
         Self {
-            si: sensor_interface,
+            spi_dev: spi_dev,
             gyro_scale: 0.0,
             accel_scale: 0.0,
         }
@@ -78,9 +56,9 @@ where
     pub fn check_identity(
         &mut self,
         delay_source: &mut impl DelayNs,
-    ) -> Result<bool, SI::InterfaceError> {
+    ) -> Result<bool, Error> {
         for _ in 0..5 {
-            let chip_id = self.si.register_read(REG_WHO_AM_I)?;
+            let chip_id = self.register_read(REG_WHO_AM_I)?;
             match chip_id {
                 ICM20602_WAI | ICM20608_WAI | ICM20689_WAI => {
                     #[cfg(feature = "rttdebug")]
@@ -103,7 +81,7 @@ where
     pub fn soft_reset(
         &mut self,
         delay_source: &mut impl DelayNs,
-    ) -> Result<(), SI::InterfaceError> {
+    ) -> Result<(), Error> {
         /// disable I2C interface if we're using SPI
         const I2C_IF_DIS: u8 = 1 << 4;
 
@@ -124,14 +102,15 @@ where
         // self.dev.write(Register::PWR_MGMT_2, 0x00)?;
         // delay.delay_ms(200);
 
-        self.si.register_write(REG_PWR_MGMT_1, PWR_DEVICE_RESET)?;
         //reset can take up to 100 ms?
+        self.register_write(REG_PWR_MGMT_1, PWR_DEVICE_RESET)?;       
+
         delay_source.delay_ms(110);
 
         let mut reset_success = false;
         for _ in 0..10 {
             //The reset bit automatically clears to 0 once the reset is done.
-            if let Ok(reg_val) = self.si.register_read(REG_PWR_MGMT_1) {
+            if let Ok(reg_val) = self.register_read(REG_PWR_MGMT_1) {
                 if reg_val & PWR_DEVICE_RESET == 0 {
                     reset_success = true;
                     break;
@@ -145,15 +124,12 @@ where
             return Err(Error::Unresponsive);
         }
 
-        if self.si.using_spi() {
-            // disable i2c just after reset
-            self.si.register_write(REG_USER_CTRL, I2C_IF_DIS)?;
-        }
+        self.register_write(REG_USER_CTRL, I2C_IF_DIS)?;
 
         //setup the automatic clock selection
-        self.si.register_write(REG_PWR_MGMT_1, CLKSEL_AUTO)?;
+        self.register_write(REG_PWR_MGMT_1, CLKSEL_AUTO)?;
         //enable accel and gyro
-        self.si.register_write(REG_PWR_MGMT_2, SENSOR_ENABLE_ALL)?;
+        self.register_write(REG_PWR_MGMT_2, SENSOR_ENABLE_ALL)?;
 
         delay_source.delay_ms(200);
 
@@ -161,7 +137,7 @@ where
     }
 
     /// give the sensor interface a chance to set up
-    pub fn setup(&mut self, delay_source: &mut impl DelayNs) -> Result<(), SI::InterfaceError> {
+    pub fn setup(&mut self, delay_source: &mut impl DelayNs) -> Result<(), Error> {
         // const DLPF_CFG_1: u8 = 0x01;
         //const SIG_COND_RST: u8 = 1 << 0;
         const FIFO_RST: u8 = 1 << 2;
@@ -180,17 +156,17 @@ where
         // self.si.register_write(Self::REG_SMPLRT_DIV, 0x01)?;
 
         // disable interrupt pin
-        self.si.register_write(REG_INT_ENABLE, 0x00)?;
+        self.register_write(REG_INT_ENABLE, 0x00)?;
 
         // disable FIFO
         //self.si.register_write(REG_FIFO_EN, 0x00)?;
 
         //enable FIFO for gyro and accel only:
-        self.si.register_write(REG_FIFO_EN, 0x7C)?;
+        self.register_write(REG_FIFO_EN, 0x7C)?;
 
         //TODO what about SIG_COND_RST  ?
         let ctrl_flags = FIFO_RST | DMP_RST;
-        self.si.register_write(REG_USER_CTRL, ctrl_flags)?;
+        self.register_write(REG_USER_CTRL, ctrl_flags)?;
 
         //configure some default ranges
         self.set_accel_range(AccelRange::default())?;
@@ -200,26 +176,26 @@ where
     }
 
     /// Set the full scale range of the accelerometer
-    pub fn set_accel_range(&mut self, range: AccelRange) -> Result<(), SI::InterfaceError> {
+    pub fn set_accel_range(&mut self, range: AccelRange) -> Result<(), Error> {
         self.accel_scale = range.scale();
-        self.si.register_write(REG_ACCEL_CONFIG, (range as u8) << 3)
+        self.register_write(REG_ACCEL_CONFIG, (range as u8) << 3)
     }
 
     /// Set the full scale range of the gyroscope
-    pub fn set_gyro_range(&mut self, range: GyroRange) -> Result<(), SI::InterfaceError> {
+    pub fn set_gyro_range(&mut self, range: GyroRange) -> Result<(), Error> {
         self.gyro_scale = range.scale();
-        self.si.register_write(REG_GYRO_CONFIG, (range as u8) << 2)
+        self.register_write(REG_GYRO_CONFIG, (range as u8) << 2)
     }
 
-    pub fn get_raw_accel(&mut self) -> Result<[i16; 3], SI::InterfaceError> {
-        self.si.read_vec3_i16(REG_ACCEL_START)
+    pub fn get_raw_accel(&mut self) -> Result<[i16; 3], Error> {
+        self.read_vec3_i16(REG_ACCEL_START)
     }
 
-    pub fn get_raw_gyro(&mut self) -> Result<[i16; 3], SI::InterfaceError> {
-        self.si.read_vec3_i16(REG_GYRO_START)
+    pub fn get_raw_gyro(&mut self) -> Result<[i16; 3], Error> {
+        self.read_vec3_i16(REG_GYRO_START)
     }
 
-    pub fn get_scaled_accel(&mut self) -> Result<[f32; 3], SI::InterfaceError> {
+    pub fn get_scaled_accel(&mut self) -> Result<[f32; 3], Error> {
         let raw_accel = self.get_raw_accel()?;
         Ok([
             self.accel_scale * (raw_accel[0] as f32),
@@ -228,13 +204,46 @@ where
         ])
     }
 
-    pub fn get_scaled_gyro(&mut self) -> Result<[f32; 3], SI::InterfaceError> {
+    pub fn get_scaled_gyro(&mut self) -> Result<[f32; 3], Error> {
         let raw_gyro = self.get_raw_gyro()?;
         Ok([
             self.gyro_scale * (raw_gyro[0] as f32),
             self.gyro_scale * (raw_gyro[1] as f32),
             self.gyro_scale * (raw_gyro[2] as f32),
         ])
+    }
+
+    fn read_block(&mut self, reg: u8, buffer: &mut [u8]) -> Result<(), Error> {
+        buffer[0] = reg | Self::DIR_READ;
+        self.spi_dev.read(buffer).map_err(|e| Error::Comm(e.kind()))?;
+        Ok(())
+    }
+
+    fn read_vec3_i16(&mut self, reg: u8) -> Result<[i16; 3], Error> {
+        let mut block: [u8; 7] = [0; 7];
+        self.read_block(reg, &mut block)?;
+
+        Ok([
+            (block[1] as i16) << 8 | (block[2] as i16),
+            (block[3] as i16) << 8 | (block[4] as i16),
+            (block[5] as i16) << 8 | (block[6] as i16),
+        ])
+    }
+
+    fn register_write(&mut self, reg: u8, val: u8) -> Result<(), Error> {
+        let block: [u8; 2] = [reg, val];
+        self.spi_dev.write(&block).map_err(|e| Error::Comm(e.kind()))?;
+        Ok(())
+    }
+
+    fn register_read(&mut self, reg: u8) -> Result<u8, Error> {
+        let mut block: [u8; 2] = [reg | Self::DIR_READ; 2];
+        self.spi_dev.read( &mut block).map_err(|e| Error::Comm(e.kind()))?;
+
+        #[cfg(feature = "rttdebug")]
+        rprintln!("read reg 0x{:x} {:x?} ", reg, block[1]);
+
+        Ok(block[1])
     }
 }
 
