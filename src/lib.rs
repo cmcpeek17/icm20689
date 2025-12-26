@@ -14,13 +14,11 @@ use panic_rtt_core::rprintln;
 //mod interface;
 //pub use interface::{SensorInterface, SpiInterface};
 
-type SensorSpiDevice<SpiE> = dyn hal_spi::SpiDevice::<u8, Error = SpiE>;
-
 /// Errors in this crate
 #[derive(Debug)]
-pub enum Error {
+pub enum Error<SpiE> {
     // Spi Error
-    Comm(hal_spi::ErrorKind),
+    Comm(SpiE),
 
     /// Unrecognized chip ID
     UnknownChipId,
@@ -28,23 +26,48 @@ pub enum Error {
     Unresponsive,
 }
 
-pub struct ICM20689<'a, SpiE>
+pub trait ICM20689Interface
+{
+    type Error;
+
+    fn check_identity(
+        &mut self,
+        delay_source: &mut impl DelayNs,
+    ) -> Result<bool, Self::Error>;
+
+    fn soft_reset(
+        &mut self,
+        delay_source: &mut impl DelayNs,
+    ) -> Result<(), Self::Error>;
+
+    fn setup(&mut self, delay_source: &mut impl DelayNs) -> Result<(), Self::Error>;
+
+    fn set_accel_range(&mut self, range: AccelRange) -> Result<(), Self::Error>;
+    fn set_gyro_range(&mut self, range: GyroRange) -> Result<(), Self::Error>;
+    fn get_raw_accel(&mut self) -> Result<[i16; 3], Self::Error>;
+    fn get_raw_gyro(&mut self) -> Result<[i16; 3], Self::Error>;
+    fn get_scaled_accel(&mut self) -> Result<[f32; 3], Self::Error>;
+    fn get_scaled_gyro(&mut self) -> Result<[f32; 3], Self::Error>;
+}
+
+pub struct ICM20689<'a, Spi, SpiE>
 where
+    Spi: hal_spi::SpiDevice::<u8, Error = SpiE>,
     SpiE: hal_spi::Error
 {
-    pub(crate) spi_dev: &'a mut SensorSpiDevice<SpiE>,
+    pub(crate) spi_dev: &'a mut Spi,
     pub(crate) gyro_scale: f32,
     pub(crate) accel_scale: f32,
 }
 
-impl<'a, SpiE> ICM20689<'a, SpiE>
+impl<'a, Spi, SpiE> ICM20689<'a, Spi, SpiE>
 where
+    Spi: hal_spi::SpiDevice::<u8, Error = SpiE>,
     SpiE: hal_spi::Error
 {
-
     const DIR_READ: u8 = 0x80; // same as 1<<7
 
-    pub fn new_with_interface(spi_dev: &'a mut SensorSpiDevice<SpiE>) -> Self {
+    pub fn new_with_interface(spi_dev: &'a mut Spi) -> Self {
         Self {
             spi_dev: spi_dev,
             gyro_scale: 0.0,
@@ -52,11 +75,53 @@ where
         }
     }
 
+    fn read_block(&mut self, reg: u8, buffer: &mut [u8]) -> Result<(), SpiE> {
+        buffer[0] = reg | Self::DIR_READ;
+        self.spi_dev.read(buffer)?;
+        Ok(())
+    }
+
+    fn read_vec3_i16(&mut self, reg: u8) -> Result<[i16; 3], SpiE> {
+        let mut block: [u8; 7] = [0; 7];
+        self.read_block(reg, &mut block)?;
+
+        Ok([
+            (block[1] as i16) << 8 | (block[2] as i16),
+            (block[3] as i16) << 8 | (block[4] as i16),
+            (block[5] as i16) << 8 | (block[6] as i16),
+        ])
+    }
+
+    fn register_write(&mut self, reg: u8, val: u8) -> Result<(), SpiE> {
+        let block: [u8; 2] = [reg, val];
+        self.spi_dev.write(&block)?;
+        Ok(())
+    }
+
+    fn register_read(&mut self, reg: u8) -> Result<u8, SpiE> {
+        let mut block: [u8; 2] = [reg | Self::DIR_READ; 2];
+        self.spi_dev.read( &mut block)?;
+
+        #[cfg(feature = "rttdebug")]
+        rprintln!("read reg 0x{:x} {:x?} ", reg, block[1]);
+
+        Ok(block[1])
+    }
+
+}
+
+impl<'a, Spi, SpiE> ICM20689Interface for ICM20689<'a, Spi, SpiE>
+where
+    Spi: hal_spi::SpiDevice::<u8, Error = SpiE>,
+    SpiE: hal_spi::Error
+{
+    type Error = Error<SpiE>;
+
     /// Read the sensor identifier and return true if they match a supported value
-    pub fn check_identity(
+    fn check_identity(
         &mut self,
         delay_source: &mut impl DelayNs,
-    ) -> Result<bool, Error> {
+    ) -> Result<bool, Self::Error> {
         for _ in 0..5 {
             let chip_id = self.register_read(REG_WHO_AM_I)?;
             match chip_id {
@@ -213,38 +278,6 @@ where
         ])
     }
 
-    fn read_block(&mut self, reg: u8, buffer: &mut [u8]) -> Result<(), Error> {
-        buffer[0] = reg | Self::DIR_READ;
-        self.spi_dev.read(buffer).map_err(|e| Error::Comm(e.kind()))?;
-        Ok(())
-    }
-
-    fn read_vec3_i16(&mut self, reg: u8) -> Result<[i16; 3], Error> {
-        let mut block: [u8; 7] = [0; 7];
-        self.read_block(reg, &mut block)?;
-
-        Ok([
-            (block[1] as i16) << 8 | (block[2] as i16),
-            (block[3] as i16) << 8 | (block[4] as i16),
-            (block[5] as i16) << 8 | (block[6] as i16),
-        ])
-    }
-
-    fn register_write(&mut self, reg: u8, val: u8) -> Result<(), Error> {
-        let block: [u8; 2] = [reg, val];
-        self.spi_dev.write(&block).map_err(|e| Error::Comm(e.kind()))?;
-        Ok(())
-    }
-
-    fn register_read(&mut self, reg: u8) -> Result<u8, Error> {
-        let mut block: [u8; 2] = [reg | Self::DIR_READ; 2];
-        self.spi_dev.read( &mut block).map_err(|e| Error::Comm(e.kind()))?;
-
-        #[cfg(feature = "rttdebug")]
-        rprintln!("read reg 0x{:x} {:x?} ", reg, block[1]);
-
-        Ok(block[1])
-    }
 }
 
 /// Common registers
