@@ -123,7 +123,7 @@ where
         delay_source: &mut impl DelayNs,
     ) -> Result<bool, Self::Error> {
         for _ in 0..5 {
-            let chip_id = self.register_read(REG_WHO_AM_I)?;
+            let chip_id = self.register_read(REG_WHO_AM_I).map_err(|e| Error::Comm(e))?;
             match chip_id {
                 ICM20602_WAI | ICM20608_WAI | ICM20689_WAI => {
                     #[cfg(feature = "rttdebug")]
@@ -143,10 +143,10 @@ where
     }
 
     /// Perform a soft reset on the sensor
-    pub fn soft_reset(
+    fn soft_reset(
         &mut self,
         delay_source: &mut impl DelayNs,
-    ) -> Result<(), Error> {
+    ) -> Result<(), Self::Error> {
         /// disable I2C interface if we're using SPI
         const I2C_IF_DIS: u8 = 1 << 4;
 
@@ -168,7 +168,7 @@ where
         // delay.delay_ms(200);
 
         //reset can take up to 100 ms?
-        self.register_write(REG_PWR_MGMT_1, PWR_DEVICE_RESET)?;       
+        self.register_write(REG_PWR_MGMT_1, PWR_DEVICE_RESET).map_err(|e| Error::Comm(e))?;
 
         delay_source.delay_ms(110);
 
@@ -189,12 +189,12 @@ where
             return Err(Error::Unresponsive);
         }
 
-        self.register_write(REG_USER_CTRL, I2C_IF_DIS)?;
+        self.register_write(REG_USER_CTRL, I2C_IF_DIS).map_err(|e| Error::Comm(e))?;
 
         //setup the automatic clock selection
-        self.register_write(REG_PWR_MGMT_1, CLKSEL_AUTO)?;
+        self.register_write(REG_PWR_MGMT_1, CLKSEL_AUTO).map_err(|e| Error::Comm(e))?;
         //enable accel and gyro
-        self.register_write(REG_PWR_MGMT_2, SENSOR_ENABLE_ALL)?;
+        self.register_write(REG_PWR_MGMT_2, SENSOR_ENABLE_ALL).map_err(|e| Error::Comm(e))?;
 
         delay_source.delay_ms(200);
 
@@ -202,7 +202,7 @@ where
     }
 
     /// give the sensor interface a chance to set up
-    pub fn setup(&mut self, delay_source: &mut impl DelayNs) -> Result<(), Error> {
+    fn setup(&mut self, delay_source: &mut impl DelayNs) -> Result<(), Self::Error> {
         // const DLPF_CFG_1: u8 = 0x01;
         //const SIG_COND_RST: u8 = 1 << 0;
         const FIFO_RST: u8 = 1 << 2;
@@ -221,17 +221,17 @@ where
         // self.si.register_write(Self::REG_SMPLRT_DIV, 0x01)?;
 
         // disable interrupt pin
-        self.register_write(REG_INT_ENABLE, 0x00)?;
+        self.register_write(REG_INT_ENABLE, 0x00).map_err(|e| Error::Comm(e))?;
 
         // disable FIFO
         //self.si.register_write(REG_FIFO_EN, 0x00)?;
 
         //enable FIFO for gyro and accel only:
-        self.register_write(REG_FIFO_EN, 0x7C)?;
+        self.register_write(REG_FIFO_EN, 0x7C).map_err(|e| Error::Comm(e))?;
 
         //TODO what about SIG_COND_RST  ?
         let ctrl_flags = FIFO_RST | DMP_RST;
-        self.register_write(REG_USER_CTRL, ctrl_flags)?;
+        self.register_write(REG_USER_CTRL, ctrl_flags).map_err(|e| Error::Comm(e))?;
 
         //configure some default ranges
         self.set_accel_range(AccelRange::default())?;
@@ -241,26 +241,26 @@ where
     }
 
     /// Set the full scale range of the accelerometer
-    pub fn set_accel_range(&mut self, range: AccelRange) -> Result<(), Error> {
+    fn set_accel_range(&mut self, range: AccelRange) -> Result<(), Self::Error> {
         self.accel_scale = range.scale();
-        self.register_write(REG_ACCEL_CONFIG, (range as u8) << 3)
+        self.register_write(REG_ACCEL_CONFIG, (range as u8) << 3).map_err(|e| Error::Comm(e))
     }
 
     /// Set the full scale range of the gyroscope
-    pub fn set_gyro_range(&mut self, range: GyroRange) -> Result<(), Error> {
+    fn set_gyro_range(&mut self, range: GyroRange) -> Result<(), Self::Error> {
         self.gyro_scale = range.scale();
-        self.register_write(REG_GYRO_CONFIG, (range as u8) << 2)
+        self.register_write(REG_GYRO_CONFIG, (range as u8) << 2).map_err(|e| Error::Comm(e))
     }
 
-    pub fn get_raw_accel(&mut self) -> Result<[i16; 3], Error> {
-        self.read_vec3_i16(REG_ACCEL_START)
+    fn get_raw_accel(&mut self) -> Result<[i16; 3], Self::Error> {
+        self.read_vec3_i16(REG_ACCEL_START).map_err(|e| Error::Comm(e))
     }
 
-    pub fn get_raw_gyro(&mut self) -> Result<[i16; 3], Error> {
-        self.read_vec3_i16(REG_GYRO_START)
+    fn get_raw_gyro(&mut self) -> Result<[i16; 3], Self::Error> {
+        self.read_vec3_i16(REG_GYRO_START).map_err(|e| Error::Comm(e))
     }
 
-    pub fn get_scaled_accel(&mut self) -> Result<[f32; 3], Error> {
+    fn get_scaled_accel(&mut self) -> Result<[f32; 3], Self::Error> {
         let raw_accel = self.get_raw_accel()?;
         Ok([
             self.accel_scale * (raw_accel[0] as f32),
@@ -269,7 +269,7 @@ where
         ])
     }
 
-    pub fn get_scaled_gyro(&mut self) -> Result<[f32; 3], Error> {
+    fn get_scaled_gyro(&mut self) -> Result<[f32; 3], Self::Error> {
         let raw_gyro = self.get_raw_gyro()?;
         Ok([
             self.gyro_scale * (raw_gyro[0] as f32),
