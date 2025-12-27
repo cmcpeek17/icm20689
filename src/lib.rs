@@ -14,8 +14,6 @@ use panic_rtt_core::rprintln;
 //mod interface;
 //pub use interface::{SensorInterface, SpiInterface};
 
-type SensorSpiDevice<SpiE> = dyn hal_spi::SpiDevice::<u8, Error = SpiE>;
-
 /// Errors in this crate
 #[derive(Debug)]
 pub enum Error {
@@ -28,23 +26,22 @@ pub enum Error {
     Unresponsive,
 }
 
-pub struct ICM20689<'a, SpiE>
-where
-    SpiE: hal_spi::Error
+pub struct ICM20689<Spi>
 {
-    pub(crate) spi_dev: &'a mut SensorSpiDevice<SpiE>,
+    pub(crate) spi_dev: Spi,
     pub(crate) gyro_scale: f32,
     pub(crate) accel_scale: f32,
 }
 
-impl<'a, SpiE> ICM20689<'a, SpiE>
+impl<Spi, SpiE> ICM20689<Spi>
 where
-    SpiE: hal_spi::Error
+    SpiE: hal_spi::Error,
+    Spi: hal_spi::SpiDevice::<u8, Error = SpiE>
 {
 
     const DIR_READ: u8 = 0x80; // same as 1<<7
 
-    pub fn new_with_interface(spi_dev: &'a mut SensorSpiDevice<SpiE>) -> Self {
+    pub fn new_with_interface(spi_dev: Spi) -> Self {
         Self {
             spi_dev: spi_dev,
             gyro_scale: 0.0,
