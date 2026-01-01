@@ -50,24 +50,24 @@ pub trait ICM20689Interface
     fn get_scaled_gyro(&mut self) -> Result<[f32; 3], Self::Error>;
 }
 
-pub struct ICM20689<'a, Spi, SpiE>
+pub struct ICM20689<Spi, SpiE>
 where
     Spi: hal_spi::SpiDevice::<u8, Error = SpiE>,
     SpiE: hal_spi::Error
 {
-    pub(crate) spi_dev: &'a mut Spi,
+    pub(crate) spi_dev: Spi,
     pub(crate) gyro_scale: f32,
     pub(crate) accel_scale: f32,
 }
 
-impl<'a, Spi, SpiE> ICM20689<'a, Spi, SpiE>
+impl<Spi, SpiE> ICM20689<Spi, SpiE>
 where
     Spi: hal_spi::SpiDevice::<u8, Error = SpiE>,
     SpiE: hal_spi::Error
 {
     const DIR_READ: u8 = 0x80; // same as 1<<7
 
-    pub fn new_with_interface(spi_dev: &'a mut Spi) -> Self {
+    pub fn new_with_interface(spi_dev: Spi) -> Self {
         Self {
             spi_dev: spi_dev,
             gyro_scale: 0.0,
@@ -110,7 +110,7 @@ where
 
 }
 
-impl<'a, Spi, SpiE> ICM20689Interface for ICM20689<'a, Spi, SpiE>
+impl<Spi, SpiE> ICM20689Interface for ICM20689<Spi, SpiE>
 where
     Spi: hal_spi::SpiDevice::<u8, Error = SpiE>,
     SpiE: hal_spi::Error
