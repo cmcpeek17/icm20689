@@ -99,8 +99,8 @@ where
     }
 
     fn register_read(&mut self, reg: u8) -> Result<u8, SpiE> {
-        let mut block: [u8; 2] = [reg | Self::DIR_READ; 2];
-        self.spi_dev.read( &mut block)?;
+        let mut block: [u8; 2] = [reg | Self::DIR_READ, 0u8];
+        self.spi_dev.transfer_in_place( &mut block)?;
 
         #[cfg(feature = "rttdebug")]
         rprintln!("read reg 0x{:x} {:x?} ", reg, block[1]);
