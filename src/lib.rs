@@ -77,7 +77,7 @@ where
 
     fn read_block(&mut self, reg: u8, buffer: &mut [u8]) -> Result<(), SpiE> {
         buffer[0] = reg | Self::DIR_READ;
-        self.spi_dev.read(buffer)?;
+        self.spi_dev.transfer_in_place(buffer)?;
         Ok(())
     }
 
